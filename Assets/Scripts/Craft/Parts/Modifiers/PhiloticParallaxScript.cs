@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using Assets.Scripts.Vizzy.Craft;
 using ModApi.Craft;
 using ModApi.Craft.Parts;
 using ModApi.Craft.Program;
@@ -24,27 +25,22 @@ namespace Assets.Scripts.Craft.Parts.Modifiers {
         }
 
         public override void OnCraftStructureChanged(ICraftScript craftScript) {
-            this._battery = this.PartScript.BatteryFuelSource;
+            this._battery = this.PartScript?.BatteryFuelSource;
         }
 
         public void FlightPostStart(in FlightFrameData frame) {
-            Debug.Log("FlightPostStart");
             if (Game.InFlightScene) {
-                Debug.Log("InFlightScene");
-                Debug.Assert(this.PartScript != null, "ASSERT FAILED: this.PartScript != null");
                 this._flightProgramScript = this.PartScript.GetModifier<FlightProgramScript>();
                 if (this._flightProgramScript != null) {
                     // For every broadcast in this Flight Program inject a special receiver that will trigger a Philotic Parallax message
                     var messages = new HashSet<String>();
-                    Debug.Assert(this._flightProgramScript.FlightProgram != null, "ASSERT FAILED: this._flightProgramScript.FlightProgram != null");
-                    Debug.Assert(this._flightProgramScript.FlightProgram.RootInstructions != null, "ASSERT FAILED: this._flightProgramScript.FlightProgram.RootInstructions != null");
                     var instructions = new Queue<ProgramInstruction>(this._flightProgramScript.FlightProgram.RootInstructions);
                     while (instructions.Count > 0) {
                         var instruction = instructions.Dequeue();
-                        Debug.Assert(instruction != null, "ASSERT FAILED: instruction != null");
                         if (instruction is BroadcastMessageInstruction broadcast) {
                             var messageExpression = broadcast.GetExpression(0);
-                            if (messageExpression is ConstantExpression constant && constant.ExpressionResult != null && constant.ExpressionResult.TextValue.StartsWith("tx_")) {
+                            if (messageExpression is ConstantExpression constant && constant.ExpressionResult != null &&
+                                constant.ExpressionResult.TextValue.StartsWith("tx_")) {
                                 messages.Add(constant.ExpressionResult.TextValue);
                             } else {
                                 Debug.LogWarning(
@@ -69,8 +65,6 @@ namespace Assets.Scripts.Craft.Parts.Modifiers {
                             new PhiloticParallaxTransmitterInstruction(this, message)
                         );
                     }
-                } else {
-                    Debug.Log("Not InFlightScene");
                 }
             }
         }
@@ -78,10 +72,34 @@ namespace Assets.Scripts.Craft.Parts.Modifiers {
         protected override void OnInitialized() {
             base.OnInitialized();
 
+            this.PartScript.MovedToNewCraft += this.OnMovedToNewCraft;
+
             if (this.PartScript.Data.Activated && this._philoticParallaxEventListener == null) {
                 // Pre-register
                 Debug.Log($"Pre-Activating PhiloticParallax Listener {this.GetHashCode()}");
                 PhiloticParallaxEvent += (this._philoticParallaxEventListener = PhiloticParallaxHandler);
+            }
+        }
+
+        private static readonly FieldInfo FlightProgramScriptCraftServiceField =
+            typeof(FlightProgramScript).GetField("_craftService", BindingFlags.Instance | BindingFlags.NonPublic);
+
+        private static readonly FieldInfo CraftServiceCommandPodField =
+            typeof(CraftService).GetField("_commandPod", BindingFlags.Instance | BindingFlags.NonPublic);
+
+        private void OnMovedToNewCraft(ICraftScript oldCraft, ICraftScript newCraft) {
+            if (this._flightProgramScript != null && oldCraft != null && newCraft != null) {
+                Debug.Log(
+                    $"PhiloticParallax Part '{this.PartScript.Data.Name}' Moved From Craft {oldCraft.CraftNode.NodeId} to {newCraft.CraftNode.NodeId}"
+                );
+
+                var craftService = (CraftService)FlightProgramScriptCraftServiceField.GetValue(this._flightProgramScript);
+                CraftServiceCommandPodField.SetValue(
+                    craftService,
+                    this.PartScript.GetModifier<CommandPodScript>() ?? this.PartScript.CommandPod
+                );
+
+                craftService.OnCraftChanged();
             }
         }
 
@@ -111,6 +129,7 @@ namespace Assets.Scripts.Craft.Parts.Modifiers {
 
         protected override void OnDisposed() {
             Debug.Log($"PhiloticParallax {this.GetHashCode()} Disposed");
+            this.PartScript.MovedToNewCraft -= this.OnMovedToNewCraft;
             base.OnDisposed();
             if (this._philoticParallaxEventListener != null) {
                 PhiloticParallaxEvent -= this._philoticParallaxEventListener;
@@ -166,7 +185,6 @@ namespace Assets.Scripts.Craft.Parts.Modifiers {
                 this._parent = parent;
                 // Drop the tx_ prefix
                 this._message = message.Substring(3);
-                Debug.Assert(_eventField != null, "ASSERT FAILED: _eventField != null");
                 _eventField.SetValue(this, ProgramEventType.ReceiveMessage);
                 this.InitializeExpressions(
                     new ConstantExpression(message)
